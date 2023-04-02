@@ -96,7 +96,7 @@ extern const u32 NIMS_0x5E_ROP_STAGE2_Part2_size;
 extern const u32 NIMS_0x5E_ROP_TakeOver[];
 extern const u32 NIMS_0x5E_ROP_TakeOver_size;
 
-Result NIMS_PWNCMD0x5EPart1(bool* haxran) {
+static Result NIMS_PWNCMD0x5EPart1(bool* haxran) {
 	Result ret = 0;
 	u32 *cmdbuf = getThreadCommandBuffer();
 
@@ -124,7 +124,7 @@ Result NIMS_PWNCMD0x5EPart1(bool* haxran) {
 	return (Result)cmdbuf[1];
 }
 
-Result NIMS_PWNCMD0x5EPart2(bool* haxran) {
+static Result NIMS_PWNCMD0x5EPart2(bool* haxran) {
 	Result ret = 0;
 	u32 *cmdbuf = getThreadCommandBuffer();
 
@@ -143,7 +143,7 @@ Result NIMS_PWNCMD0x5EPart2(bool* haxran) {
 	return (Result)cmdbuf[1];
 }
 
-Result AMNET_GetDeviceCert(u8 *buffer)
+static Result AMNET_GetDeviceCert(u8 *buffer)
 {
 	Result ret = 0;
 	u32 *cmdbuf = getThreadCommandBuffer();
@@ -159,7 +159,7 @@ Result AMNET_GetDeviceCert(u8 *buffer)
 	return (Result)cmdbuf[1];
 }
 
-Result AM_GetCiaRequiredSpacePwn(Handle fileHandle, Handle* pxiam9_handle)
+static Result AM_GetCiaRequiredSpacePwn(Handle fileHandle, Handle* pxiam9_handle)
 {
 	Result ret = 0;
 	volatile u32 *cmdbuf = getThreadCommandBuffer();
@@ -179,7 +179,7 @@ Result AM_GetCiaRequiredSpacePwn(Handle fileHandle, Handle* pxiam9_handle)
 	return (Result)cmdbuf[1];
 }
 
-Result AMPXI_GetDeviceID(volatile int* internal_error, volatile u32* device_id) {
+static Result AMPXI_GetDeviceID(volatile int* internal_error, volatile u32* device_id) {
 	Result ret = 0;
 	volatile u32 *cmdbuf = getThreadCommandBuffer();
 
@@ -193,9 +193,22 @@ Result AMPXI_GetDeviceID(volatile int* internal_error, volatile u32* device_id) 
 	return (Result)cmdbuf[1];
 }
 
+static Result NIMS_GetErrorCode(int* error_code) {
+	Result ret = 0;
+	u32 *cmdbuf = getThreadCommandBuffer();
+
+	cmdbuf[0] = IPC_MakeHeader(0x31, 0, 0); // 0x00310000
+
+	if (R_FAILED(ret = svcSendSyncRequest(*nimsGetSessionHandle()))) return ret;
+
+	if (error_code) *error_code = cmdbuf[2];
+
+	return (Result)cmdbuf[1];
+}
+
 Result funWithNim() {
 	Result ret;
-	bool haxran;
+	bool haxran = false;
 
 	ret = _nimsInit();
 	if (R_FAILED(ret)) {
@@ -352,7 +365,7 @@ int main(int argc, char **argv)
 	ret = check_nim_version();
 
 	if(R_SUCCEEDED(ret)) {
-		printf("Initializing ctr-httpwn...\n");
+		printf("Initializing nim & ctr-httpwn...\n");
 	} else {
 		if (ret == RES_INVALID_VALUE) 
 			printf("NIM version invalid, expecting v14341\n");
@@ -360,6 +373,24 @@ int main(int argc, char **argv)
 			printf("Error while trying to check nim version\n");
 	}
 
+	if (R_SUCCEEDED(ret)) {
+		// init nim the standard way first
+		void* mem = linearAlloc(0x200000);
+
+		if (mem) {
+			ret = nimsInit(mem, 0x200000);
+			if (R_FAILED(ret)) {
+				int error;
+				Result _ret = NIMS_GetErrorCode(&error);
+				if (R_FAILED(_ret)) printf("Failed to init nim:s and get error code. %08lX / %08lX\n", ret, _ret);
+				else printf("Failed to init nim:s. %08lX / %03i-%04i\n", ret, error / 10000, error % 10000);
+			}
+			nimsExit();
+			linearFree(mem);
+		} else {
+			printf("Failed to allocate linear memory.\n");
+		}
+	}
 
 	gfxFlushBuffers();
 	gfxSwapBuffers();
