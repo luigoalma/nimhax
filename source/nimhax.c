@@ -345,6 +345,157 @@ static Result check_nim_version() {
 	return ret;
 }
 
+// ---------------------------------------
+// because there was no function to get current cfg handle
+// copied some functions from ctrulib and added a new
+
+static Handle cfgHandle;
+static int cfgRefCount;
+
+static Result _cfgInit(void)
+{
+	Result ret;
+
+	if (AtomicPostIncrement(&cfgRefCount)) return 0;
+
+	// cfg:i has the most commands, then cfg:s, then cfg:u
+	ret = srvGetServiceHandle(&cfgHandle, "cfg:i");
+	if(R_FAILED(ret)) ret = srvGetServiceHandle(&cfgHandle, "cfg:s");
+	//if(R_FAILED(ret)) ret = srvGetServiceHandle(&cfguHandle, "cfg:u"); // not useful here
+	if(R_FAILED(ret)) AtomicDecrement(&cfgRefCount);
+
+	return ret;
+}
+
+static void _cfgExit(void)
+{
+	if (AtomicDecrement(&cfgRefCount)) return;
+	svcCloseHandle(cfgHandle);
+}
+
+static Result _CFG_GetConfigInfoBlk4(u32 size, u32 blkID, volatile void* outData)
+{
+	Result ret = 0;
+	u32 *cmdbuf = getThreadCommandBuffer();
+
+	cmdbuf[0] = IPC_MakeHeader(0x401,2,2); // 0x4010082
+	cmdbuf[1] = size;
+	cmdbuf[2] = blkID;
+	cmdbuf[3] = IPC_Desc_Buffer(size,IPC_BUFFER_W);
+	cmdbuf[4] = (u32)outData;
+
+	if(R_FAILED(ret = svcSendSyncRequest(cfgHandle)))return ret;
+
+	return (Result)cmdbuf[1];
+}
+
+static Result _CFG_SetConfigInfoBlk4(u32 size, u32 blkID, volatile const void* inData)
+{
+	Result ret = 0;
+	u32 *cmdbuf = getThreadCommandBuffer();
+
+	cmdbuf[0] = IPC_MakeHeader(0x402,2,2); // 0x4020082
+	cmdbuf[1] = blkID;
+	cmdbuf[2] = size;
+	cmdbuf[3] = IPC_Desc_Buffer(size,IPC_BUFFER_R);
+	cmdbuf[4] = (u32)inData;
+
+	if(R_FAILED(ret = svcSendSyncRequest(cfgHandle)))return ret;
+
+	return (Result)cmdbuf[1];
+}
+
+static Result _CFGI_CreateConfigInfoBlk(u32 size, u32 blkID, u16 blkFlags, const void* inData)
+{
+	Result ret = 0;
+	u32 *cmdbuf = getThreadCommandBuffer();
+
+	cmdbuf[0] = IPC_MakeHeader(0x804,3,2); // 0x80400C2
+	cmdbuf[1] = blkID;
+	cmdbuf[2] = size;
+	cmdbuf[3] = blkFlags;
+	cmdbuf[4] = IPC_Desc_Buffer(size,IPC_BUFFER_R);
+	cmdbuf[5] = (u32)inData;
+
+	if(R_FAILED(ret = svcSendSyncRequest(cfgHandle)))return ret;
+
+	return (Result)cmdbuf[1];
+}
+
+#define CFG_BLKID_NOT_FOUND MAKERESULT(RL_PERMANENT, RS_WRONGARG, RM_CONFIG, RD_NOT_FOUND)
+
+static Result try_ensure_npns() {
+	Result ret = _cfgInit();
+	if (R_FAILED(ret)) {
+		printf("Failed to init cfg. Assuming NPNS is set.\n");
+		printf("Will fail if this not set!!\n");
+		printf("Open eShop if exploit fails if able without updating.\n");
+		return 0;
+	}
+
+	static const char expected_npns_server_selector[4] = {'L', '1', 0, 0};
+	static const char dummy_npns_token[0x28] = {'A', 0};
+	volatile char npns_server_selector[4] = {0};
+	volatile char npns_token[0x28] = {0};
+
+	ret = _CFG_GetConfigInfoBlk4(4, 0x150002, &npns_server_selector);
+	if (ret == CFG_BLKID_NOT_FOUND) {
+		ret = _CFGI_CreateConfigInfoBlk(4, 0x150002, 0xE, expected_npns_server_selector);
+		npns_server_selector[0] = 'L';
+	}
+
+	if (R_SUCCEEDED(ret)) ret = _CFG_GetConfigInfoBlk4(0x28, 0xF0006, &npns_token);
+
+	if (ret == CFG_BLKID_NOT_FOUND) {
+		ret = _CFGI_CreateConfigInfoBlk(0x28, 0xF0006, 0xC, dummy_npns_token);
+		npns_token[0] = 'A';
+	}
+
+	if (R_FAILED(ret)) {
+		printf("Cannot guarantee NPNS is set!!\n");
+		printf("Will fail if this not set!!\n");
+		printf("Open eShop if pwn fails if able without updating.\n");
+		return 0; // we'll try as well and hope
+	}
+
+	if (npns_token[0] == 0) {
+		printf("Invalid NPNS Token, fixing...\n");
+		ret = _CFG_SetConfigInfoBlk4(0x28, 0xF0006, dummy_npns_token);
+	}
+
+	if (R_SUCCEEDED(ret) && npns_server_selector[0] != 'l' && npns_server_selector[0] != 'L') {
+		printf("Invalid NPNS Server selector, fixing...\n");
+		ret = _CFG_SetConfigInfoBlk4(4, 0x150002, expected_npns_server_selector);
+	}
+
+	_cfgExit();
+	return ret;
+}
+
+// ---------------------------------------
+
+static Result try_ensure_nim_tokens() {
+	// init nim the standard way first
+	Result ret = MAKERESULT(RL_FATAL, RS_OUTOFRESOURCE, RM_APPLICATION, RD_OUT_OF_MEMORY);
+	void* mem = linearAlloc(0x200000);
+
+	if (!mem) {
+		printf("Failed to allocate linear memory.\n");
+		return ret;
+	}
+
+	ret = nimsInit(mem, 0x200000);
+	if (R_FAILED(ret)) {
+		int error;
+		Result _ret = NIMS_GetErrorCode(&error);
+		if (R_FAILED(_ret)) printf("Failed to init nim:s and get error code. %08lX / %08lX\n", ret, _ret);
+		else printf("Failed to init nim:s. %08lX / %03i-%04i\n", ret, error / 10000, error % 10000);
+	}
+	nimsExit();
+	linearFree(mem);
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
 	char *serverconfig_localpath = "nim_config.xml";
@@ -365,7 +516,8 @@ int main(int argc, char **argv)
 	ret = check_nim_version();
 
 	if(R_SUCCEEDED(ret)) {
-		printf("Initializing nim & ctr-httpwn...\n");
+		printf("Initializing nim...\n");
+		try_ensure_nim_tokens(); // may not be the reason to lose hope yet if fail
 	} else {
 		if (ret == RES_INVALID_VALUE) 
 			printf("NIM version invalid, expecting v14341\n");
@@ -374,22 +526,13 @@ int main(int argc, char **argv)
 	}
 
 	if (R_SUCCEEDED(ret)) {
-		// init nim the standard way first
-		void* mem = linearAlloc(0x200000);
+		printf("Trying to ensure npns tokens...\n");
+		ret = try_ensure_npns();
+	}
 
-		if (mem) {
-			ret = nimsInit(mem, 0x200000);
-			if (R_FAILED(ret)) {
-				int error;
-				Result _ret = NIMS_GetErrorCode(&error);
-				if (R_FAILED(_ret)) printf("Failed to init nim:s and get error code. %08lX / %08lX\n", ret, _ret);
-				else printf("Failed to init nim:s. %08lX / %03i-%04i\n", ret, error / 10000, error % 10000);
-			}
-			nimsExit();
-			linearFree(mem);
-		} else {
-			printf("Failed to allocate linear memory.\n");
-		}
+	if (R_FAILED(ret)) {
+		printf("NPNS is invalid but we failed to fix it!!\n");
+		printf("res = 0x%08lx\n", ret);
 	}
 
 	gfxFlushBuffers();
@@ -397,6 +540,8 @@ int main(int argc, char **argv)
 	gspWaitForVBlank();
 
 	if (R_SUCCEEDED(ret)) {
+		printf("Initializing ctr-httpwn...\n");
+
 		consoleSelect(&topScreen);
 
 		ret = initialize_ctr_httpwn(serverconfig_localpath);
